@@ -80,7 +80,7 @@
   .badge.pass{ background:var(--ng); }
   .badge.fail{ background:#9aa1ad; }
   .result-table{ width:100%; border-collapse:collapse; font-size:13px; margin-bottom:12px; }
-  .result-table th, .result-table td{ border:1px solid var(--border); padding:8px 10px; text-align:left; }
+  .result-table th, .result-table td{ border:1px solid var(--border); padding:8px 10px; text-align:left; word-break:break-word; }
   .result-table th{ background:#f0f2f5; color:#3a4150; font-weight:700; }
   .result-table td.ok{ color:var(--ok); font-weight:700; }
   .result-table td.ng{ color:var(--ng); font-weight:700; }
@@ -92,6 +92,7 @@
     vertical-align:middle; margin-right:6px;
   }
   @keyframes spin{ to{ transform:rotate(360deg); } }
+  #diagnostic-card .step-header{ color:var(--navy-dark); }
 </style>
 </head>
 <body>
@@ -100,7 +101,8 @@
   <p class="lead">住所を入れて、制約を選んで、閾値を決めて、判定ボタンを押すだけ。国土地理院API・OpenStreetMap（Overpass API）に実際に問い合わせて判定します。</p>
 
   <div class="warn">
-    ※海岸線データの取得は「直接アクセス」→「CORSプロキシ経由」の順に自動で試行します。ソフトウェアのインストールは不要です。プロキシ利用時は、検索座標（緯度経度）が外部の中継サービスを経由します（住所そのものの個人情報は含みません）。案件検討情報の取り扱いに関する社内規程がある場合は、事前にご確認ください。
+    ※海岸線データの取得は「直接アクセス」→「CORSプロキシ経由」の順に自動で試行します。ソフトウェアのインストールは不要です。プロキシ利用時は、検索座標（緯度経度）が外部の中継サービスを経由します（住所そのものの個人情報は含みません）。案件検討情報の取り扱いに関する社内規程がある場合は、事前にご確認ください。<br>
+    ※実行後、画面下部に「API接続診断ログ」が表示されます。社内ネットワークで接続できないAPIがある場合は、そちらでどのAPIが失敗しているか確認できます。
   </div>
 
   <div class="card">
@@ -145,6 +147,34 @@ const constraints = {
   sea: { label: '海からの距離', unit: 'm', operators: ['以上離れていること','以下であること'], default: 500 },
   elevation: { label: '海抜', unit: 'm', operators: ['以上であること','以下であること'], default: 3 }
 };
+
+// ---- API接続診断ログ ----
+let diagnosticLog = [];
+function logDiagnostic(entry){ diagnosticLog.push(entry); }
+function renderDiagnostics(){
+  if (diagnosticLog.length === 0) return '';
+  return `
+    <div class="card" id="diagnostic-card">
+      <div class="step-header">🔍 API接続診断ログ</div>
+      <table class="result-table">
+        <thead><tr><th>API</th><th>状態</th><th>応答時間</th><th>詳細</th></tr></thead>
+        <tbody>
+          ${diagnosticLog.map(d => `
+            <tr>
+              <td>${escapeHtml(d.name)}</td>
+              <td class="${d.ok ? 'ok' : 'ng'}">${d.ok ? '成功' : '失敗'}</td>
+              <td>${d.timeMs != null ? d.timeMs + ' ms' : '-'}</td>
+              <td style="font-size:11px;">${escapeHtml(d.detail)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      <p class="datasource">
+        ※このログは、各APIへの接続試行結果をそのまま表示しています。「失敗」となっているAPIがある場合、社内ネットワークで当該ドメインへの通信がブロックされている可能性があります。IT部門へ確認する際は、このログをスクリーンショット等でご提示ください。
+      </p>
+    </div>
+  `;
+}
 
 function buildThresholdRow(key){
   const c = constraints[key];
@@ -193,22 +223,36 @@ function escapeHtml(str){
 // ---- 国土地理院 ジオコーディングAPI ----
 async function geocodeAddress(address){
   const url = 'https://msearch.gsi.go.jp/address-search/AddressSearch?q=' + encodeURIComponent(address);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('住所検索APIへの接続に失敗しました');
-  const data = await res.json();
-  if (!data || data.length === 0) throw new Error('住所が見つかりませんでした。表記をご確認ください。');
-  const [lon, lat] = data[0].geometry.coordinates;
-  return { lat, lon, title: data[0].properties.title };
+  const t0 = performance.now();
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTPエラー ${res.status}`);
+    const data = await res.json();
+    if (!data || data.length === 0) throw new Error('該当住所が見つかりませんでした');
+    const [lon, lat] = data[0].geometry.coordinates;
+    logDiagnostic({name:'① 国土地理院 ジオコーディングAPI', ok:true, timeMs:Math.round(performance.now()-t0), detail:`取得成功：${data[0].properties.title}（緯度${lat.toFixed(6)}, 経度${lon.toFixed(6)}）`});
+    return { lat, lon, title: data[0].properties.title };
+  } catch (err){
+    logDiagnostic({name:'① 国土地理院 ジオコーディングAPI', ok:false, timeMs:Math.round(performance.now()-t0), detail: err.message});
+    throw new Error('住所検索に失敗しました：' + err.message);
+  }
 }
 
 // ---- 国土地理院 標高API ----
 async function getElevation(lat, lon){
   const url = `https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php?lon=${lon}&lat=${lat}&outtype=JSON`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('標高APIへの接続に失敗しました');
-  const data = await res.json();
-  if (data.elevation === '-----' || data.elevation === null) throw new Error('標高データが取得できませんでした（データなし範囲の可能性）');
-  return Number(data.elevation);
+  const t0 = performance.now();
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTPエラー ${res.status}`);
+    const data = await res.json();
+    if (data.elevation === '-----' || data.elevation === null) throw new Error('標高データなし（データ範囲外の可能性）');
+    logDiagnostic({name:'② 国土地理院 標高API', ok:true, timeMs:Math.round(performance.now()-t0), detail:`取得成功：${data.elevation}m`});
+    return Number(data.elevation);
+  } catch (err){
+    logDiagnostic({name:'② 国土地理院 標高API', ok:false, timeMs:Math.round(performance.now()-t0), detail: err.message});
+    throw new Error('標高取得に失敗しました：' + err.message);
+  }
 }
 
 // ---- 緯度経度をローカル平面座標（メートル）へ変換 ----
@@ -260,7 +304,6 @@ const ACCESS_METHODS = [
   { label: 'CORSプロキシ(corsproxy.io)', wrap: (url) => 'https://corsproxy.io/?' + encodeURIComponent(url) }
 ];
 
-// Overpassのサーバー側タイムアウトヒントは25秒。クライアント側はそれより長めに設定する。
 const OVERPASS_TIMEOUT_MS = 28000;
 
 async function findNearestCoastlineDistance(lat, lon, radius, onProgress){
@@ -272,12 +315,16 @@ async function findNearestCoastlineDistance(lat, lon, radius, onProgress){
     const host = endpoint.replace('https://','').split('/')[0];
     for (const method of ACCESS_METHODS){
       const targetUrl = method.wrap(baseUrl);
+      const t0 = performance.now();
+      const label = `③ Overpass API（${host} / ${method.label}）`;
       try {
         if (onProgress) onProgress(`海岸線データを取得中…（${host} / ${method.label}）`);
         const res = await fetchWithTimeout(targetUrl, {}, OVERPASS_TIMEOUT_MS);
+        const timeMs = Math.round(performance.now() - t0);
         if (!res.ok) throw new Error(`HTTPエラー ${res.status}`);
         const data = await res.json();
         if (!data.elements || data.elements.length === 0){
+          logDiagnostic({name:label, ok:true, timeMs, detail:'接続成功（検索範囲内に海岸線データなし）'});
           return { distance: null, note: `検索範囲(${radius}m)内に海岸線データが見つかりませんでした` };
         }
         let minDist = Infinity;
@@ -289,9 +336,15 @@ async function findNearestCoastlineDistance(lat, lon, radius, onProgress){
             if (d < minDist) minDist = d;
           }
         }
-        if (!isFinite(minDist)) return { distance: null, note: '海岸線の形状データを取得できませんでした' };
+        if (!isFinite(minDist)){
+          logDiagnostic({name:label, ok:false, timeMs, detail:'海岸線の形状データを解析できませんでした'});
+          return { distance: null, note: '海岸線の形状データを取得できませんでした' };
+        }
+        logDiagnostic({name:label, ok:true, timeMs, detail:`接続成功（最短距離 約${Math.round(minDist)}m、取得件数${data.elements.length}件）`});
         return { distance: Math.round(minDist), note: null };
       } catch (err){
+        const timeMs = Math.round(performance.now() - t0);
+        logDiagnostic({name:label, ok:false, timeMs, detail: err.message});
         lastError = err;
         console.warn(`[失敗] ${host} / ${method.label}: ${err.message}`);
         continue;
@@ -316,7 +369,6 @@ document.getElementById('run-btn').addEventListener('click', async () => {
     return;
   }
 
-  // 数値入力チェック
   if (seaChecked){
     const val = Number(document.getElementById('val-sea').value);
     const radius = Number(document.getElementById('search-radius').value);
@@ -332,6 +384,8 @@ document.getElementById('run-btn').addEventListener('click', async () => {
       return;
     }
   }
+
+  diagnosticLog = []; // 実行毎にログをリセット
 
   const btn = document.getElementById('run-btn');
   btn.disabled = true;
@@ -355,8 +409,6 @@ document.getElementById('run-btn').addEventListener('click', async () => {
       );
 
       if (sea.distance === null){
-        // 検索範囲内に海岸線が無い場合、検索半径が閾値以上なら
-        // 「距離 > 検索半径 ≧ 閾値」が確定するため論理的に判定可能
         let pass = null;
         let actual = sea.note;
         if (radius >= val){
@@ -414,9 +466,12 @@ document.getElementById('run-btn').addEventListener('click', async () => {
         データソース：住所検索は国土地理院ジオコーディングAPI、海岸線検索はOpenStreetMap（Overpass API／natural=coastline）、標高は国土地理院標高APIを使用しています。Google Maps Platform（Places API・Elevation API）は使用していません。<br>
         ※オープンデータのため、実際の位置と誤差がある場合があります。正式な塩害リスク評価には専門機関の知見・現地調査での裏付けを推奨します。
       </p>
-    `;
+    ` + renderDiagnostics();
   } catch (err){
     setStatus('エラー：' + err.message, true);
+    const el = document.getElementById('result');
+    el.style.display = 'block';
+    el.innerHTML = renderDiagnostics();
     console.error(err);
   } finally {
     btn.disabled = false;
